@@ -165,10 +165,6 @@ Enable with:
 sudo systemctl enable --now ixfeed.timer
 ```
 
-## Author
-
-**Andre Franca** – [andre@abf.li](mailto:andre@abf.li)
-
 ## License
 
 AGPL-3.0-or-later – see [LICENSE](LICENSE) for details.
