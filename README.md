@@ -23,7 +23,7 @@ Download the latest release for your platform from the [Releases page](https://g
 
 Available for:
 - Linux (x86_64, aarch64)
-- macOS (x86_64, Apple Silicon)
+- macOS (Apple Silicon)
 - Windows (x86_64)
 
 ### Build from Source
