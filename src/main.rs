@@ -49,6 +49,8 @@ enum Commands {
     ClearDb,
     /// Dry run - show URLs that would be submitted without actually submitting
     DryRun,
+    /// Submit URLs without confirmation (for automation)
+    Unattended,
     /// Show version information
     Version,
     /// Show help information
@@ -105,6 +107,12 @@ fn main() {
                 process::exit(1);
             }
         }
+        Some(Commands::Unattended) => {
+            if let Err(e) = run_unattended_submission() {
+                eprintln!("{}: {}", "Error".red().bold(), e);
+                process::exit(1);
+            }
+        }
         None => {
             // Check if config is complete
             if !config::is_config_complete() {
@@ -150,6 +158,7 @@ fn print_help() {
     println!("  {}       Show current configuration", "show".cyan());
     println!("  {}   Clear the database (WARNING: destructive operation)", "clear-db".cyan());
     println!("  {}    Dry run - show URLs that would be submitted", "dry-run".cyan());
+    println!("  {} Submit URLs without confirmation (for automation)", "unattended".cyan());
     println!("  {}    Show version information", "version".cyan());
     println!("  {}       Show this help message", "help".cyan());
     println!();
@@ -365,6 +374,63 @@ fn run_submission() -> Result<(), Box<dyn std::error::Error>> {
     handle_subsequent_run(&conn, &cfg, &entries)
 }
 
+fn run_unattended_submission() -> Result<(), Box<dyn std::error::Error>> {
+    // Load and validate config
+    let cfg = config::load_config()?;
+    config::validate_config(&cfg)?;
+
+    // Initialize database
+    let conn = db::init_db()?;
+
+    // Fetch URLs from source
+    let source_type_str = match cfg.source_type {
+        SourceType::Feed => "feed",
+        SourceType::Sitemap => "sitemap",
+    };
+    println!(
+        "{} Fetching {} from {}...",
+        "→".blue().bold(),
+        source_type_str,
+        cfg.source_url
+    );
+
+    let entries: Vec<UrlEntry> = match cfg.source_type {
+        SourceType::Feed => feed::fetch_feed_urls(&cfg.source_url)?,
+        SourceType::Sitemap => sitemap::fetch_sitemap_urls(&cfg.source_url)?,
+    };
+
+    if entries.is_empty() {
+        println!(
+            "\n{} No URLs found in {}.",
+            "⚠".yellow().bold(),
+            source_type_str
+        );
+        println!(
+            "{} Add content to your {} and run again.",
+            "→".blue().bold(),
+            source_type_str
+        );
+        return Ok(());
+    }
+
+    println!(
+        "{} Found {} URLs in {}.",
+        "✓".green().bold(),
+        entries.len(),
+        source_type_str
+    );
+
+    // Check if this is first run using database flag
+    let is_first_run = db::is_first_run(&conn)?;
+
+    if is_first_run {
+        return handle_first_run_unattended(&conn, &cfg, &entries);
+    }
+
+    // Subsequent runs: check for new and modified URLs
+    handle_subsequent_run_unattended(&conn, &cfg, &entries)
+}
+
 fn handle_first_run(
     conn: &rusqlite::Connection,
     cfg: &config::Config,
@@ -434,6 +500,65 @@ fn handle_first_run(
             "→".blue().bold()
         );
     }
+
+    // Mark first run as completed
+    db::mark_first_run_completed(conn)?;
+
+    Ok(())
+}
+
+fn handle_first_run_unattended(
+    conn: &rusqlite::Connection,
+    cfg: &config::Config,
+    entries: &[UrlEntry],
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!(
+        "\n{} First run detected. Found {} URLs.",
+        "ℹ".cyan().bold(),
+        entries.len()
+    );
+
+    // Store all URLs in database first
+    println!("{} Storing URLs in database...", "→".blue().bold());
+    for entry in entries {
+        db::add_url_with_date(conn, &entry.url, entry.date.as_deref())?;
+    }
+    println!(
+        "{} Stored {} URLs.",
+        "✓".green().bold(),
+        entries.len()
+    );
+
+    // Automatically submit all URLs (unattended mode)
+    println!();
+    println!(
+        "{} Unattended mode: Submitting all URLs on first run.",
+        "ℹ".cyan().bold()
+    );
+
+    // Build submit entries
+    let submit_entries: Vec<SubmitEntry> = entries
+        .iter()
+        .map(|e| SubmitEntry {
+            url: e.url.clone(),
+            reason: SubmitReason::New,
+        })
+        .collect();
+
+    println!(
+        "\n{} Submitting {} URL(s) to {}...\n",
+        "→".blue().bold(),
+        submit_entries.len(),
+        cfg.searchengine
+    );
+
+    submit::submit_in_batches(cfg, &submit_entries)?;
+
+    println!(
+        "\n{} Successfully submitted {} URL(s).",
+        "✓".green().bold(),
+        submit_entries.len()
+    );
 
     // Mark first run as completed
     db::mark_first_run_completed(conn)?;
@@ -532,6 +657,111 @@ fn handle_subsequent_run(
     println!(
         "\n{} Submitting to {}...\n",
         "→".blue().bold(),
+        cfg.searchengine
+    );
+
+    submit::submit_in_batches(cfg, &to_submit)?;
+
+    // Update database with submitted URLs
+    for entry in &to_submit {
+        let date = match &entry.reason {
+            SubmitReason::New => entries
+                .iter()
+                .find(|e| e.url == entry.url)
+                .and_then(|e| e.date.as_deref()),
+            SubmitReason::Modified { date } => Some(date.as_str()),
+        };
+        db::add_url_with_date(conn, &entry.url, date)?;
+    }
+
+    println!(
+        "\n{} Successfully submitted and stored {} URL(s).",
+        "✓".green().bold(),
+        to_submit.len()
+    );
+
+    Ok(())
+}
+
+fn handle_subsequent_run_unattended(
+    conn: &rusqlite::Connection,
+    cfg: &config::Config,
+    entries: &[UrlEntry],
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Get stored URLs with their dates
+    let stored_urls = db::get_urls_with_dates(conn)?;
+
+    let mut to_submit: Vec<SubmitEntry> = Vec::new();
+    let mut new_count = 0;
+    let mut modified_count = 0;
+
+    for entry in entries {
+        if let Some(stored_date) = stored_urls.get(&entry.url) {
+            // URL exists in database - check if it was modified
+            if let Some(new_date) = &entry.date {
+                let is_modified = match stored_date {
+                    Some(old_date) => new_date != old_date,
+                    None => true, // No previous date, treat as modified
+                };
+
+                if is_modified {
+                    to_submit.push(SubmitEntry {
+                        url: entry.url.clone(),
+                        reason: SubmitReason::Modified {
+                            date: new_date.clone(),
+                        },
+                    });
+                    modified_count += 1;
+                }
+            }
+        } else {
+            // New URL - not in database
+            to_submit.push(SubmitEntry {
+                url: entry.url.clone(),
+                reason: SubmitReason::New,
+            });
+            new_count += 1;
+        }
+    }
+
+    if to_submit.is_empty() {
+        println!(
+            "{} No new or modified URLs to submit. All URLs are up to date.",
+            "✓".green().bold()
+        );
+        return Ok(());
+    }
+
+    println!(
+        "\n{} Found {} URL(s) to submit: {} new, {} modified",
+        "ℹ".cyan().bold(),
+        to_submit.len(),
+        new_count,
+        modified_count
+    );
+
+    // List URLs to be submitted
+    if new_count > 0 {
+        println!("\n{} ({}):", "New URLs".green().bold(), new_count);
+        for entry in to_submit.iter().filter(|e| matches!(e.reason, SubmitReason::New)) {
+            println!("  • {}", entry.url);
+        }
+    }
+    if modified_count > 0 {
+        println!("\n{} ({}):", "Modified URLs".yellow().bold(), modified_count);
+        for entry in &to_submit {
+            if let SubmitReason::Modified { date } = &entry.reason {
+                println!("  • {} (updated: {})", entry.url, date.cyan());
+            }
+        }
+    }
+
+    // Unattended mode: submit without confirmation
+    println!();
+    println!(
+        "{} Unattended mode: Submitting {} URL(s) to {}...\n",
+        "→".blue().bold(),
+        to_submit.len(),
         cfg.searchengine
     );
 
