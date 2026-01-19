@@ -61,9 +61,12 @@ cargo build --release
 | `ixfeed config` | Edit configuration interactively |
 | `ixfeed show` | Show current configuration |
 | `ixfeed dry-run` | Preview URLs that would be submitted |
+| `ixfeed unattended` | Submit URLs without confirmation (for automation) |
 | `ixfeed clear-db` | Clear the URL database (destructive!) |
 | `ixfeed version` | Show version |
 | `ixfeed help` | Show help |
+
+> **⚠️ Important**: Run `ixfeed` (interactive mode) at least once before using `ixfeed unattended`. The first run in unattended mode will automatically submit all URLs from your feed/sitemap, which may include outdated or deprecated content.
 
 ## Configuration
 
@@ -111,6 +114,7 @@ Configuration is stored in SQLite database:
 │ 1. Fetch feed/sitemap URLs                              │
 │ 2. Store all URLs in database                           │
 │ 3. Ask user if they want to submit (default: No)        │
+│    OR: Submit automatically (unattended mode)           │
 │ 4. Mark first run as completed                          │
 └─────────────────────────────────────────────────────────┘
 
@@ -121,17 +125,20 @@ Configuration is stored in SQLite database:
 │ 2. Compare with stored URLs and dates                   │
 │ 3. Identify NEW and MODIFIED URLs                       │
 │ 4. Ask for confirmation (default: Yes)                  │
+│    OR: Submit automatically (unattended mode)           │
 │ 5. Submit to IndexNow and update database               │
 └─────────────────────────────────────────────────────────┘
 ```
 
 ## Automation
 
+> **⚠️ Warning**: Before setting up automated runs with `ixfeed unattended`, run the application interactively (`ixfeed`) at least once to review and confirm the initial URL submission. Unattended mode will automatically submit all URLs on first run without confirmation.
+
 ### Cron (Linux/macOS)
 
 ```bash
-# Run every hour (use --yes flag when available for non-interactive)
-0 * * * * /path/to/ixfeed >> /var/log/ixfeed.log 2>&1
+# Run every hour (use unattended subcommand for non-interactive)
+0 * * * * /path/to/ixfeed unattended >> /var/log/ixfeed.log 2>&1
 ```
 
 ### Systemd Timer
@@ -143,7 +150,7 @@ Description=IndexNow Feed/Sitemap Submitter
 
 [Service]
 Type=oneshot
-ExecStart=/path/to/ixfeed
+ExecStart=/path/to/ixfeed unattended
 User=youruser
 ```
 
