@@ -66,8 +66,6 @@ cargo build --release
 | `ixfeed version` | Show version |
 | `ixfeed help` | Show help |
 
-> **⚠️ Important**: Run `ixfeed` (interactive mode) at least once before using `ixfeed unattended`. The first run in unattended mode will automatically submit all URLs from your feed/sitemap, which may include outdated or deprecated content.
-
 ## Configuration
 
 Configuration is stored in SQLite database:
