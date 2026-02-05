@@ -19,7 +19,6 @@ use crate::db;
 use colored::*;
 use dialoguer::{Confirm, Input, Select};
 use reqwest::blocking::Client;
-use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use url::Url;
@@ -40,14 +39,8 @@ impl std::fmt::Display for SourceType {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct Config {
-    pub api_key: String,
-    pub source_type: SourceType,
-    pub source_url: String,
-    pub host: String,
-    pub searchengine: String,
-}
+// Re-export Source from db module for convenience
+pub use crate::db::Source;
 
 /// Extract host (domain) from a URL
 fn extract_host_from_url(url: &str) -> Option<String> {
@@ -147,286 +140,53 @@ fn validate_source_url(url: &str, source_type: SourceType) -> Result<String, Str
     Ok(final_url)
 }
 
-fn get_config_value(conn: &Connection, key: &str) -> Option<String> {
-    conn.query_row(
-        "SELECT value FROM config WHERE key = ?1",
-        [key],
-        |row| row.get(0),
-    )
-    .ok()
-}
-
-fn set_config_value(conn: &Connection, key: &str, value: &str) -> Result<(), Box<dyn std::error::Error>> {
-    conn.execute(
-        "INSERT INTO config (key, value) VALUES (?1, ?2)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        [key, value],
-    )?;
-    Ok(())
-}
-
-pub fn load_config() -> Result<Config, Box<dyn std::error::Error>> {
-    let conn = db::init_db()?;
-    
-    let source_type = match get_config_value(&conn, "source_type").as_deref() {
-        Some("sitemap") => SourceType::Sitemap,
-        _ => SourceType::Feed,
-    };
-    
-    // Support legacy "rss_feed" key for backwards compatibility
-    let source_url = get_config_value(&conn, "source_url")
-        .or_else(|| get_config_value(&conn, "rss_feed"))
-        .unwrap_or_default();
-    
-    Ok(Config {
-        api_key: get_config_value(&conn, "api_key").unwrap_or_default(),
-        source_type,
-        source_url,
-        host: get_config_value(&conn, "host").unwrap_or_default(),
-        searchengine: get_config_value(&conn, "searchengine").unwrap_or_default(),
-    })
-}
-
-pub fn save_config(cfg: &Config) -> Result<(), Box<dyn std::error::Error>> {
-    let conn = db::init_db()?;
-    
-    set_config_value(&conn, "api_key", &cfg.api_key)?;
-    set_config_value(&conn, "source_type", match cfg.source_type {
-        SourceType::Feed => "feed",
-        SourceType::Sitemap => "sitemap",
-    })?;
-    set_config_value(&conn, "source_url", &cfg.source_url)?;
-    set_config_value(&conn, "host", &cfg.host)?;
-    set_config_value(&conn, "searchengine", &cfg.searchengine)?;
-    
-    println!(
-        "{} Configuration saved to database",
-        "✓".green().bold()
-    );
-    Ok(())
-}
-
-pub fn validate_config(cfg: &Config) -> Result<(), Box<dyn std::error::Error>> {
-    let mut missing = Vec::new();
-
-    if cfg.api_key.is_empty() {
-        missing.push("api_key");
-    }
-    if cfg.source_url.is_empty() {
-        missing.push("source_url (feed or sitemap URL)");
-    }
-    if cfg.host.is_empty() {
-        missing.push("host");
-    }
-    if cfg.searchengine.is_empty() {
-        missing.push("searchengine");
-    }
-
-    if !missing.is_empty() {
-        return Err(format!(
-            "Missing required configuration: {}. Run '{} config' to configure.",
-            missing.join(", "),
-            env!("CARGO_PKG_NAME")
-        )
-        .into());
-    }
-
-    Ok(())
-}
-
-pub fn is_config_complete() -> bool {
-    match load_config() {
-        Ok(cfg) => {
-            !cfg.api_key.is_empty()
-                && !cfg.source_url.is_empty()
-                && !cfg.host.is_empty()
-                && !cfg.searchengine.is_empty()
+/// Check if there are any sources configured
+pub fn has_sources() -> bool {
+    match db::init_db() {
+        Ok(conn) => {
+            let sources = db::get_all_sources(&conn).unwrap_or_default();
+            !sources.is_empty()
         }
         Err(_) => false,
     }
 }
 
-pub fn edit_config() -> Result<(), Box<dyn std::error::Error>> {
-    let mut cfg = load_config()?;
-
-    println!(
-        "{} IndexNow Configuration Editor",
-        "═".repeat(40).blue().bold()
-    );
-    println!("Press Enter to keep current value (shown in brackets)\n");
-
-    // API Key (required)
-    let current_key = if cfg.api_key.is_empty() {
-        "none".to_string()
-    } else {
-        format!("{}...", &cfg.api_key[..cfg.api_key.len().min(8)])
-    };
-    loop {
-        let api_key: String = Input::new()
-            .with_prompt(format!("API Key [{}]", current_key))
-            .allow_empty(true)
-            .interact_text()?;
-        if !api_key.is_empty() {
-            cfg.api_key = api_key;
-            break;
-        } else if !cfg.api_key.is_empty() {
-            break;
-        }
-        println!("{} API Key is required.", "⚠".yellow().bold());
-    }
-
-    // Source Type Selection
-    println!("\n{}", "URL Source Type:".bold());
-    let source_options = vec!["RSS/Atom/JSON Feed", "Sitemap XML"];
-    let current_idx = match cfg.source_type {
-        SourceType::Feed => 0,
-        SourceType::Sitemap => 1,
-    };
-    let selection = Select::new()
-        .with_prompt("Select source type")
-        .items(&source_options)
-        .default(current_idx)
-        .interact()?;
-    
-    cfg.source_type = match selection {
-        0 => SourceType::Feed,
-        _ => SourceType::Sitemap,
-    };
-
-    // Source URL (required, validated)
-    let source_label = match cfg.source_type {
-        SourceType::Feed => "RSS/Atom/JSON Feed URL",
-        SourceType::Sitemap => "Sitemap URL (e.g., https://example.com/sitemap.xml)",
-    };
-    let current_source = if cfg.source_url.is_empty() {
-        "none".to_string()
-    } else {
-        cfg.source_url.clone()
-    };
-    loop {
-        let source_url: String = Input::new()
-            .with_prompt(format!("{} [{}]", source_label, current_source))
-            .allow_empty(true)
-            .interact_text()?;
-        
-        let url_to_validate = if !source_url.is_empty() {
-            source_url.clone()
-        } else if !cfg.source_url.is_empty() {
-            cfg.source_url.clone()
-        } else {
-            println!("{} Source URL is required.", "⚠".yellow().bold());
-            continue;
-        };
-        
-        // Validate the URL
-        match validate_source_url(&url_to_validate, cfg.source_type) {
-            Ok(validated_url) => {
-                cfg.source_url = validated_url;
-                println!("  {} URL is valid and accessible.", "✓".green().bold());
-                break;
-            }
-            Err(e) => {
-                println!("{} {}", "✗".red().bold(), e);
-                // Clear the current source if user entered a new invalid one
-                if !source_url.is_empty() {
-                    continue;
-                }
-                // If they pressed enter with existing value that's now invalid, ask again
-                continue;
-            }
-        }
-    }
-
-    // Auto-extract host from source URL
-    let extracted_host = extract_host_from_url(&cfg.source_url);
-    if let Some(ref host) = extracted_host {
-        cfg.host = host.clone();
-        println!(
-            "{} Host auto-detected from URL: {}",
-            "✓".green().bold(),
-            host.cyan()
-        );
-    } else {
-        // Host not detected, ask user
-        let current_host = if cfg.host.is_empty() {
-            "none".to_string()
-        } else {
-            cfg.host.clone()
-        };
-        loop {
-            let host: String = Input::new()
-                .with_prompt(format!("Host (your domain, e.g., example.com) [{}]", current_host))
-                .allow_empty(true)
-                .interact_text()?;
-            if !host.is_empty() {
-                cfg.host = host;
-                break;
-            } else if !cfg.host.is_empty() {
-                break;
-            }
-            println!("{} Host is required.", "⚠".yellow().bold());
-        }
-    }
-
-    // Search Engine
-    let current_engine = if cfg.searchengine.is_empty() {
-        "api.indexnow.org".to_string()
-    } else {
-        cfg.searchengine.clone()
-    };
-    println!("\n{}", "Available IndexNow endpoints:".dimmed());
-    println!("  • api.indexnow.org (recommended, forwards to all)");
-    println!("  • www.bing.com");
-    println!("  • yandex.com");
-    println!("  • search.seznam.cz\n");
-
-    let searchengine: String = Input::new()
-        .with_prompt(format!("Search Engine Host [{}]", current_engine))
-        .allow_empty(true)
-        .interact_text()?;
-    if !searchengine.is_empty() {
-        cfg.searchengine = searchengine;
-    } else if cfg.searchengine.is_empty() {
-        cfg.searchengine = "api.indexnow.org".to_string();
-    }
-
-    // Confirm and save
-    println!("\n{}", "Configuration Summary:".bold());
-    println!("  API Key:       {}", mask_key(&cfg.api_key));
-    println!("  Source Type:   {}", cfg.source_type.to_string().cyan());
-    println!("  Source URL:    {}", cfg.source_url);
-    println!("  Host:          {}", cfg.host);
-    println!("  Search Engine: {}", cfg.searchengine);
-
-    if Confirm::new()
-        .with_prompt("Save this configuration?")
-        .default(true)
-        .interact()?
-    {
-        save_config(&cfg)?;
-    } else {
-        println!("{} Configuration not saved.", "⚠".yellow().bold());
-    }
-
-    Ok(())
+/// Get all configured sources
+pub fn get_sources() -> Result<Vec<Source>, Box<dyn std::error::Error>> {
+    let conn = db::init_db()?;
+    Ok(db::get_all_sources(&conn)?)
 }
 
-pub fn list_config() -> Result<(), Box<dyn std::error::Error>> {
-    let cfg = load_config()?;
+/// Add a new source (feed or sitemap) with per-source config
+pub fn add_source(source_type: SourceType, source_url: &str, api_key: &str, host: &str, searchengine: &str) -> Result<i64, Box<dyn std::error::Error>> {
+    let conn = db::init_db()?;
+    
+    // Check if source already exists
+    if db::source_exists(&conn, source_url)? {
+        return Err(format!("Source already exists: {}", source_url).into());
+    }
+    
+    let type_str = match source_type {
+        SourceType::Feed => "feed",
+        SourceType::Sitemap => "sitemap",
+    };
+    
+    let id = db::add_source(&conn, type_str, source_url, api_key, host, searchengine)?;
+    Ok(id)
+}
 
-    println!(
-        "{} IndexNow Configuration",
-        "═".repeat(40).blue().bold()
-    );
-    println!("Stored in: {}\n", "SQLite database".dimmed());
+/// Remove a source by ID
+pub fn remove_source(id: i64) -> Result<bool, Box<dyn std::error::Error>> {
+    let conn = db::init_db()?;
+    Ok(db::remove_source(&conn, id)?)
+}
 
-    if cfg.api_key.is_empty()
-        && cfg.source_url.is_empty()
-        && cfg.host.is_empty()
-        && cfg.searchengine.is_empty()
-    {
+pub fn edit_config() -> Result<(), Box<dyn std::error::Error>> {
+    let sources = get_sources()?;
+
+    if sources.is_empty() {
         println!(
-            "{} No configuration found. Run '{} config' to configure.",
+            "{} No sources configured. Run '{} --add' to add a source first.",
             "⚠".yellow().bold(),
             env!("CARGO_PKG_NAME")
         );
@@ -434,46 +194,458 @@ pub fn list_config() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!(
-        "  {} {}",
-        "API Key:".bold(),
-        if cfg.api_key.is_empty() {
-            "(not set)".red().to_string()
-        } else {
-            mask_key(&cfg.api_key)
+        "{} Edit Source Configuration",
+        "═".repeat(40).blue().bold()
+    );
+
+    // List available sources
+    println!("\n{}", "Available sources:".bold());
+    let source_labels: Vec<String> = sources
+        .iter()
+        .map(|s| {
+            let type_str = match s.source_type.as_str() {
+                "sitemap" => "Sitemap",
+                _ => "Feed",
+            };
+            format!("[{}] {} - {}", s.id, type_str, s.source_url)
+        })
+        .collect();
+
+    let selection = Select::new()
+        .with_prompt("Select source to edit")
+        .items(&source_labels)
+        .interact()?;
+
+    let source = &sources[selection];
+
+    println!("\n{}", "Edit settings (press Enter to keep current value):".dimmed());
+
+    // Source Type
+    let type_options = vec!["RSS/Atom/JSON Feed", "Sitemap XML"];
+    let current_type_idx = if source.source_type == "sitemap" { 1 } else { 0 };
+    let type_selection = Select::new()
+        .with_prompt(format!("Source Type [{}]", type_options[current_type_idx]))
+        .items(&type_options)
+        .default(current_type_idx)
+        .interact()?;
+    let new_source_type = if type_selection == 1 { "sitemap" } else { "feed" };
+
+    // Source URL
+    let new_url: String = Input::new()
+        .with_prompt(format!("Source URL [{}]", source.source_url))
+        .allow_empty(true)
+        .interact_text()?;
+    let new_url = if new_url.is_empty() {
+        source.source_url.clone()
+    } else {
+        // Validate the new URL if changed
+        let stype = if new_source_type == "sitemap" { SourceType::Sitemap } else { SourceType::Feed };
+        match validate_source_url(&new_url, stype) {
+            Ok(validated) => validated,
+            Err(e) => {
+                println!("{} {}", "✗".red().bold(), e);
+                println!("Keeping original URL.");
+                source.source_url.clone()
+            }
         }
-    );
-    println!(
-        "  {} {}",
-        "Source Type:".bold(),
-        cfg.source_type.to_string().cyan()
-    );
-    println!(
-        "  {} {}",
-        "Source URL:".bold(),
-        if cfg.source_url.is_empty() {
-            "(not set)".red().to_string()
+    };
+
+    // API Key
+    let current_key = if source.api_key.is_empty() {
+        "none".to_string()
+    } else {
+        mask_key(&source.api_key)
+    };
+    let new_api_key: String = Input::new()
+        .with_prompt(format!("API Key [{}]", current_key))
+        .allow_empty(true)
+        .interact_text()?;
+    let new_api_key = if new_api_key.is_empty() {
+        source.api_key.clone()
+    } else {
+        new_api_key
+    };
+
+    // Host
+    let current_host = if source.host.is_empty() {
+        "none".to_string()
+    } else {
+        source.host.clone()
+    };
+    let new_host: String = Input::new()
+        .with_prompt(format!("Host [{}]", current_host))
+        .allow_empty(true)
+        .interact_text()?;
+    let new_host = if new_host.is_empty() {
+        source.host.clone()
+    } else {
+        new_host
+    };
+
+    // Search Engine
+    let current_engine = if source.searchengine.is_empty() {
+        "api.indexnow.org".to_string()
+    } else {
+        source.searchengine.clone()
+    };
+    println!("\n{}", "Available IndexNow endpoints:".dimmed());
+    println!("  • api.indexnow.org (recommended, forwards to all)");
+    println!("  • www.bing.com");
+    println!("  • yandex.com");
+    println!("  • search.seznam.cz\n");
+
+    let new_searchengine: String = Input::new()
+        .with_prompt(format!("Search Engine Host [{}]", current_engine))
+        .allow_empty(true)
+        .interact_text()?;
+    let new_searchengine = if new_searchengine.is_empty() {
+        if source.searchengine.is_empty() {
+            "api.indexnow.org".to_string()
         } else {
-            cfg.source_url.green().to_string()
+            source.searchengine.clone()
         }
-    );
+    } else {
+        new_searchengine
+    };
+
+    // Summary and confirm
+    println!("\n{}", "Updated Configuration:".bold());
+    println!("  Type:          {}", if new_source_type == "sitemap" { "Sitemap".cyan() } else { "Feed".cyan() });
+    println!("  URL:           {}", new_url.green());
+    println!("  API Key:       {}", mask_key(&new_api_key));
+    println!("  Host:          {}", new_host.green());
+    println!("  Search Engine: {}", new_searchengine.green());
+
+    if Confirm::new()
+        .with_prompt("Save changes?")
+        .default(true)
+        .interact()?
+    {
+        let conn = db::init_db()?;
+        db::update_source(&conn, source.id, new_source_type, &new_url, &new_api_key, &new_host, &new_searchengine)?;
+        println!(
+            "{} Configuration saved.",
+            "✓".green().bold()
+        );
+    } else {
+        println!("{} Configuration not saved.", "⚠".yellow().bold());
+    }
+
+    Ok(())
+}
+
+/// Interactive source addition
+pub fn add_source_interactive() -> Result<(), Box<dyn std::error::Error>> {
     println!(
-        "  {} {}",
-        "Host:".bold(),
-        if cfg.host.is_empty() {
-            "(not set)".red().to_string()
-        } else {
-            cfg.host.green().to_string()
-        }
+        "{} Add New Source (Feed or Sitemap)",
+        "═".repeat(35).blue().bold()
     );
+
+    // Source Type Selection
+    println!("\n{}", "URL Source Type:".bold());
+    let source_options = vec!["RSS/Atom/JSON Feed", "Sitemap XML"];
+    let selection = Select::new()
+        .with_prompt("Select source type")
+        .items(&source_options)
+        .default(0)
+        .interact()?;
+    
+    let source_type = match selection {
+        0 => SourceType::Feed,
+        _ => SourceType::Sitemap,
+    };
+
+    // Source URL (required, validated)
+    let source_label = match source_type {
+        SourceType::Feed => "RSS/Atom/JSON Feed URL",
+        SourceType::Sitemap => "Sitemap URL (e.g., https://example.com/sitemap.xml)",
+    };
+    
+    let validated_url = loop {
+        let source_url: String = Input::new()
+            .with_prompt(source_label)
+            .interact_text()?;
+        
+        if source_url.is_empty() {
+            println!("{} Source URL is required.", "⚠".yellow().bold());
+            continue;
+        }
+        
+        // Check if already exists
+        let conn = db::init_db()?;
+        if db::source_exists(&conn, &source_url)? {
+            println!("{} This source already exists.", "⚠".yellow().bold());
+            continue;
+        }
+        
+        // Validate the URL
+        match validate_source_url(&source_url, source_type) {
+            Ok(validated_url) => {
+                println!("  {} URL is valid and accessible.", "✓".green().bold());
+                break validated_url;
+            }
+            Err(e) => {
+                println!("{} {}", "✗".red().bold(), e);
+                continue;
+            }
+        }
+    };
+
+    // Extract host suggestion from URL
+    let suggested_host = extract_host_from_url(&validated_url).unwrap_or_default();
+
+    println!("\n{}", "IndexNow API Settings for this source:".bold());
+    
+    // API Key (required)
+    let api_key = loop {
+        let key: String = Input::new()
+            .with_prompt("API Key (your IndexNow key)")
+            .interact_text()?;
+        if !key.is_empty() {
+            break key;
+        }
+        println!("{} API Key is required.", "⚠".yellow().bold());
+    };
+
+    // Host (required)
+    let host = loop {
+        let h: String = Input::new()
+            .with_prompt(format!("Host (your domain) [{}]", if suggested_host.is_empty() { "required".to_string() } else { suggested_host.clone() }))
+            .allow_empty(true)
+            .interact_text()?;
+        if !h.is_empty() {
+            break h;
+        } else if !suggested_host.is_empty() {
+            break suggested_host.clone();
+        }
+        println!("{} Host is required.", "⚠".yellow().bold());
+    };
+
+    // Search Engine
+    println!("\n{}", "Available IndexNow endpoints:".dimmed());
+    println!("  • api.indexnow.org (recommended, forwards to all)");
+    println!("  • www.bing.com");
+    println!("  • yandex.com");
+    println!("  • search.seznam.cz\n");
+
+    let searchengine: String = Input::new()
+        .with_prompt("Search Engine Host [api.indexnow.org]")
+        .allow_empty(true)
+        .interact_text()?;
+    let searchengine = if searchengine.is_empty() {
+        "api.indexnow.org".to_string()
+    } else {
+        searchengine
+    };
+
+    // Summary and confirm
+    println!("\n{}", "Source Summary:".bold());
+    println!("  Type:          {}", source_type.to_string().cyan());
+    println!("  URL:           {}", validated_url.green());
+    println!("  API Key:       {}", mask_key(&api_key));
+    println!("  Host:          {}", host.green());
+    println!("  Search Engine: {}", searchengine.green());
+
+    if Confirm::new()
+        .with_prompt("Add this source?")
+        .default(true)
+        .interact()?
+    {
+        let id = add_source(source_type, &validated_url, &api_key, &host, &searchengine)?;
+        
+        println!(
+            "\n{} Source added successfully (ID: {})",
+            "✓".green().bold(),
+            id
+        );
+    } else {
+        println!("{} Operation cancelled.", "ℹ".cyan().bold());
+    }
+
+    Ok(())
+}
+
+/// List all configured sources
+pub fn list_sources() -> Result<(), Box<dyn std::error::Error>> {
+    let sources = get_sources()?;
+    
     println!(
-        "  {} {}",
-        "Search Engine:".bold(),
-        if cfg.searchengine.is_empty() {
-            "(not set)".red().to_string()
-        } else {
-            cfg.searchengine.green().to_string()
-        }
+        "{} Configured Sources",
+        "═".repeat(40).blue().bold()
     );
+    
+    if sources.is_empty() {
+        println!(
+            "\n{} No sources configured. Run '{} --add' to add a source.",
+            "⚠".yellow().bold(),
+            env!("CARGO_PKG_NAME")
+        );
+        return Ok(());
+    }
+    
+    println!();
+    for source in &sources {
+        let type_str = match source.source_type.as_str() {
+            "sitemap" => "Sitemap".cyan(),
+            _ => "Feed".cyan(),
+        };
+        let status = if source.first_run_completed {
+            "synced".green()
+        } else {
+            "new".yellow()
+        };
+        println!(
+            "  {} [{}] {} ({})",
+            source.id.to_string().bold(),
+            type_str,
+            source.source_url,
+            status
+        );
+        println!("     API Key: {}  Host: {}  Engine: {}",
+            mask_key(&source.api_key),
+            if source.host.is_empty() { "(not set)".red().to_string() } else { source.host.green().to_string() },
+            source.searchengine.dimmed()
+        );
+    }
+    
+    println!(
+        "\n{} Use '{} -e <ids>' to process specific sources.",
+        "ℹ".cyan().bold(),
+        env!("CARGO_PKG_NAME")
+    );
+
+    Ok(())
+}
+
+/// Remove a source interactively
+pub fn remove_source_interactive() -> Result<(), Box<dyn std::error::Error>> {
+    let sources = get_sources()?;
+    
+    if sources.is_empty() {
+        println!(
+            "{} No sources configured.",
+            "ℹ".cyan().bold()
+        );
+        return Ok(());
+    }
+    
+    println!(
+        "{} Remove Source",
+        "═".repeat(40).blue().bold()
+    );
+    
+    // List sources
+    println!("\n{}", "Available sources:".bold());
+    for source in &sources {
+        let type_str = match source.source_type.as_str() {
+            "sitemap" => "Sitemap",
+            _ => "Feed",
+        };
+        println!("  {} [{}] {}", source.id, type_str, source.source_url);
+    }
+    
+    // Ask for ID
+    let id: String = Input::new()
+        .with_prompt("\nEnter source ID to remove (or press Enter to cancel)")
+        .allow_empty(true)
+        .interact_text()?;
+    
+    if id.is_empty() {
+        println!("{} Operation cancelled.", "ℹ".cyan().bold());
+        return Ok(());
+    }
+    
+    let id: i64 = id.parse().map_err(|_| "Invalid ID")?;
+    
+    // Find the source
+    let source = sources.iter().find(|s| s.id == id);
+    if source.is_none() {
+        return Err(format!("Source with ID {} not found", id).into());
+    }
+    let source = source.unwrap();
+    
+    // Confirm
+    println!("\n{} This will remove:", "⚠ WARNING:".yellow().bold());
+    println!("  Source: {}", source.source_url);
+    println!("  And all associated submitted URLs from the database.\n");
+    
+    if Confirm::new()
+        .with_prompt("Are you sure?")
+        .default(false)
+        .interact()?
+    {
+        remove_source(id)?;
+        println!(
+            "{} Source removed.",
+            "✓".green().bold()
+        );
+    } else {
+        println!("{} Operation cancelled.", "ℹ".cyan().bold());
+    }
+
+    Ok(())
+}
+
+pub fn list_config() -> Result<(), Box<dyn std::error::Error>> {
+    let sources = get_sources()?;
+
+    println!(
+        "{} IndexNow Configuration",
+        "═".repeat(40).blue().bold()
+    );
+    println!("Stored in: {}\n", "SQLite database".dimmed());
+
+    if sources.is_empty() {
+        println!(
+            "{} No sources configured. Run '{} --add' to add a source.",
+            "⚠".yellow().bold(),
+            env!("CARGO_PKG_NAME")
+        );
+        return Ok(());
+    }
+
+    println!("{} ({}):", "Sources".bold(), sources.len());
+    for source in &sources {
+        let type_str = match source.source_type.as_str() {
+            "sitemap" => "Sitemap".cyan(),
+            _ => "Feed".cyan(),
+        };
+        let status = if source.first_run_completed {
+            "synced".green()
+        } else {
+            "new".yellow()
+        };
+        println!(
+            "\n  {} [{}] {} ({})",
+            source.id.to_string().bold(),
+            type_str,
+            source.source_url.green(),
+            status
+        );
+        println!(
+            "     {} {}",
+            "API Key:".bold(),
+            mask_key(&source.api_key)
+        );
+        println!(
+            "     {} {}",
+            "Host:".bold(),
+            if source.host.is_empty() {
+                "(not set)".red().to_string()
+            } else {
+                source.host.green().to_string()
+            }
+        );
+        println!(
+            "     {} {}",
+            "Search Engine:".bold(),
+            if source.searchengine.is_empty() {
+                "(not set)".red().to_string()
+            } else {
+                source.searchengine.green().to_string()
+            }
+        );
+    }
 
     Ok(())
 }
