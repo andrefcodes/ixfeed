@@ -19,7 +19,7 @@ mod feed;
 mod sitemap;
 mod submit;
 
-use clap::{Parser, Subcommand};
+use clap::Parser;
 use colored::*;
 use config::SourceType;
 use dialoguer::Confirm;
@@ -32,88 +32,108 @@ use submit::{SubmitEntry, SubmitReason};
 #[command(name = "ixfeed")]
 #[command(disable_version_flag = true)]
 #[command(disable_help_flag = true)]
-#[command(disable_help_subcommand = true)]
 #[command(about, long_about = None)]
 struct Cli {
-    #[command(subcommand)]
-    command: Option<Commands>,
-}
-
-#[derive(Subcommand)]
-enum Commands {
     /// Edit configuration (API key, source URL, host, search engine)
-    Config,
+    #[arg(short, long)]
+    config: bool,
+
     /// Show current configuration
-    Show,
+    #[arg(short, long)]
+    show: bool,
+
     /// Clear the database (WARNING: destructive operation)
-    ClearDb,
+    #[arg(long)]
+    clear_db: bool,
+
     /// Dry run - show URLs that would be submitted without actually submitting
-    DryRun,
+    #[arg(short, long)]
+    dry_run: bool,
+
     /// Submit URLs without confirmation (for automation)
-    Unattended,
+    #[arg(short, long)]
+    unattended: bool,
+
     /// Show version information
-    Version,
+    #[arg(short = 'V', long)]
+    version: bool,
+
     /// Show help information
-    Help,
+    #[arg(short, long)]
+    help: bool,
 }
 
 fn main() {
     let cli = Cli::parse();
 
-    match cli.command {
-        Some(Commands::Config) => {
-            if let Err(e) = config::edit_config() {
-                eprintln!("{}: {}", "Error".red().bold(), e);
-                process::exit(1);
-            }
+    if cli.help {
+        print_help();
+        return;
+    }
+
+    if cli.version {
+        println!(
+            "{} v{} {}",
+            env!("CARGO_PKG_NAME"),
+            env!("CARGO_PKG_VERSION"),
+            "(ALPHA)".yellow().bold()
+        );
+        println!();
+        println!(
+            "{}  {}: This software is in alpha stage.",
+            "⚠️".yellow(),
+            "WARNING".yellow().bold()
+        );
+        println!("   Features may be incomplete, unstable, or change without notice.");
+        println!();
+        println!("Copyright (C) 2026 Andre Franca");
+        println!("Licensed under the GNU AGPL v3.0 or later.");
+        println!("See <https://www.gnu.org/licenses/agpl-3.0.html> for details.");
+        return;
+    }
+
+    if cli.config {
+        if let Err(e) = config::edit_config() {
+            eprintln!("{}: {}", "Error".red().bold(), e);
+            process::exit(1);
         }
-        Some(Commands::Show) => {
-            if let Err(e) = config::list_config() {
-                eprintln!("{}: {}", "Error".red().bold(), e);
-                process::exit(1);
-            }
+        return;
+    }
+
+    if cli.show {
+        if let Err(e) = config::list_config() {
+            eprintln!("{}: {}", "Error".red().bold(), e);
+            process::exit(1);
         }
-        Some(Commands::ClearDb) => {
-            if let Err(e) = db::clear_database() {
-                eprintln!("{}: {}", "Error".red().bold(), e);
-                process::exit(1);
-            }
+        return;
+    }
+
+    if cli.clear_db {
+        if let Err(e) = db::clear_database() {
+            eprintln!("{}: {}", "Error".red().bold(), e);
+            process::exit(1);
         }
-        Some(Commands::Version) => {
-            println!(
-                "{} v{} {}",
-                env!("CARGO_PKG_NAME"),
-                env!("CARGO_PKG_VERSION"),
-                "(ALPHA)".yellow().bold()
-            );
-            println!();
-            println!(
-                "{}  {}: This software is in alpha stage.",
-                "⚠️".yellow(),
-                "WARNING".yellow().bold()
-            );
-            println!("   Features may be incomplete, unstable, or change without notice.");
-            println!();
-            println!("Copyright (C) 2026 Andre Franca");
-            println!("Licensed under the GNU AGPL v3.0 or later.");
-            println!("See <https://www.gnu.org/licenses/agpl-3.0.html> for details.");
+        return;
+    }
+
+    if cli.dry_run {
+        if let Err(e) = run_dry_run() {
+            eprintln!("{}: {}", "Error".red().bold(), e);
+            process::exit(1);
         }
-        Some(Commands::Help) => {
-            print_help();
+        return;
+    }
+
+    if cli.unattended {
+        if let Err(e) = run_unattended_submission() {
+            eprintln!("{}: {}", "Error".red().bold(), e);
+            process::exit(1);
         }
-        Some(Commands::DryRun) => {
-            if let Err(e) = run_dry_run() {
-                eprintln!("{}: {}", "Error".red().bold(), e);
-                process::exit(1);
-            }
-        }
-        Some(Commands::Unattended) => {
-            if let Err(e) = run_unattended_submission() {
-                eprintln!("{}: {}", "Error".red().bold(), e);
-                process::exit(1);
-            }
-        }
-        None => {
+        return;
+    }
+
+    // Default: run submission workflow
+    {
             // Check if config is complete
             if !config::is_config_complete() {
                 println!(
@@ -127,19 +147,18 @@ fn main() {
                 // Verify config was saved properly
                 if !config::is_config_complete() {
                     eprintln!(
-                        "{}: Configuration incomplete. Please run '{} config' to complete setup.",
+                        "{}: Configuration incomplete. Please run '{} --config' to complete setup.",
                         "Error".red().bold(),
                         env!("CARGO_PKG_NAME")
                     );
                     process::exit(1);
                 }
-                println!(); // Blank line before submission
-            }
-            // Now run the submission workflow
-            if let Err(e) = run_submission() {
-                eprintln!("{}: {}", "Error".red().bold(), e);
-                process::exit(1);
-            }
+            println!(); // Blank line before submission
+        }
+        // Now run the submission workflow
+        if let Err(e) = run_submission() {
+            eprintln!("{}: {}", "Error".red().bold(), e);
+            process::exit(1);
         }
     }
 }
@@ -151,22 +170,22 @@ fn print_help() {
     );
     println!();
     println!("{}", "Usage:".bold());
-    println!("  {} [COMMAND]", env!("CARGO_PKG_NAME"));
+    println!("  {} [OPTIONS]", env!("CARGO_PKG_NAME"));
     println!();
-    println!("{}", "Commands:".bold());
-    println!("  {}     Edit configuration (API key, source URL, host, search engine)", "config".cyan());
-    println!("  {}       Show current configuration", "show".cyan());
-    println!("  {}   Clear the database (WARNING: destructive operation)", "clear-db".cyan());
-    println!("  {}    Dry run - show URLs that would be submitted", "dry-run".cyan());
-    println!("  {} Submit URLs without confirmation (for automation)", "unattended".cyan());
-    println!("  {}    Show version information", "version".cyan());
-    println!("  {}       Show this help message", "help".cyan());
+    println!("{}", "Options:".bold());
+    println!("  {}, {}     Edit configuration (API key, source URL, host, search engine)", "-c".cyan(), "--config".cyan());
+    println!("  {}, {}       Show current configuration", "-s".cyan(), "--show".cyan());
+    println!("      {}   Clear the database (WARNING: destructive operation)", "--clear-db".cyan());
+    println!("  {}, {}    Dry run - show URLs that would be submitted", "-d".cyan(), "--dry-run".cyan());
+    println!("  {}, {} Submit URLs without confirmation (for automation)", "-u".cyan(), "--unattended".cyan());
+    println!("  {}, {}    Show version information", "-V".cyan(), "--version".cyan());
+    println!("  {}, {}       Show this help message", "-h".cyan(), "--help".cyan());
     println!();
     println!("{}", "Examples:".bold());
-    println!("  {} config    # Configure API key, feed/sitemap URL, etc.", env!("CARGO_PKG_NAME"));
-    println!("  {}           # Run submission (default command)", env!("CARGO_PKG_NAME"));
-    println!("  {} dry-run   # Show what would be submitted", env!("CARGO_PKG_NAME"));
-    println!("  {} show      # Show current configuration", env!("CARGO_PKG_NAME"));
+    println!("  {} --config  # Configure API key, feed/sitemap URL, etc.", env!("CARGO_PKG_NAME"));
+    println!("  {}           # Run submission (default)", env!("CARGO_PKG_NAME"));
+    println!("  {} --dry-run # Show what would be submitted", env!("CARGO_PKG_NAME"));
+    println!("  {} -s        # Show current configuration", env!("CARGO_PKG_NAME"));
 }
 
 fn run_dry_run() -> Result<(), Box<dyn std::error::Error>> {
