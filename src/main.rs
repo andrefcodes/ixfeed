@@ -34,13 +34,29 @@ use submit::{SubmitEntry, SubmitReason};
 #[command(disable_help_flag = true)]
 #[command(about, long_about = None)]
 struct Cli {
-    /// Edit configuration (API key, source URL, host, search engine)
+    /// Edit configuration (API key, host, search engine)
     #[arg(short, long)]
     config: bool,
 
-    /// Show current configuration
+    /// Show current configuration and sources
     #[arg(short, long)]
     show: bool,
+
+    /// Add a new source (feed or sitemap)
+    #[arg(short, long)]
+    add: bool,
+
+    /// Remove a source
+    #[arg(short, long)]
+    remove: bool,
+
+    /// List all configured sources
+    #[arg(short, long)]
+    list: bool,
+
+    /// Process only specific source entries (comma-separated IDs, e.g., -e 1,2,3)
+    #[arg(short, long, value_delimiter = ',')]
+    entry: Option<Vec<i64>>,
 
     /// Clear the database (WARNING: destructive operation)
     #[arg(long)]
@@ -59,7 +75,7 @@ struct Cli {
     version: bool,
 
     /// Show help information
-    #[arg(short, long)]
+    #[arg(short = 'H', long)]
     help: bool,
 }
 
@@ -108,6 +124,30 @@ fn main() {
         return;
     }
 
+    if cli.add {
+        if let Err(e) = config::add_source_interactive() {
+            eprintln!("{}: {}", "Error".red().bold(), e);
+            process::exit(1);
+        }
+        return;
+    }
+
+    if cli.remove {
+        if let Err(e) = config::remove_source_interactive() {
+            eprintln!("{}: {}", "Error".red().bold(), e);
+            process::exit(1);
+        }
+        return;
+    }
+
+    if cli.list {
+        if let Err(e) = config::list_sources() {
+            eprintln!("{}: {}", "Error".red().bold(), e);
+            process::exit(1);
+        }
+        return;
+    }
+
     if cli.clear_db {
         if let Err(e) = db::clear_database() {
             eprintln!("{}: {}", "Error".red().bold(), e);
@@ -117,7 +157,7 @@ fn main() {
     }
 
     if cli.dry_run {
-        if let Err(e) = run_dry_run() {
+        if let Err(e) = run_dry_run(cli.entry.as_deref()) {
             eprintln!("{}: {}", "Error".red().bold(), e);
             process::exit(1);
         }
@@ -125,7 +165,7 @@ fn main() {
     }
 
     if cli.unattended {
-        if let Err(e) = run_unattended_submission() {
+        if let Err(e) = run_unattended_submission(cli.entry.as_deref()) {
             eprintln!("{}: {}", "Error".red().bold(), e);
             process::exit(1);
         }
@@ -134,29 +174,21 @@ fn main() {
 
     // Default: run submission workflow
     {
-            // Check if config is complete
-            if !config::is_config_complete() {
-                println!(
-                    "{} No configuration found. Let's set it up first.\n",
-                    "ℹ".cyan().bold()
-                );
-                if let Err(e) = config::edit_config() {
-                    eprintln!("{}: {}", "Error".red().bold(), e);
-                    process::exit(1);
-                }
-                // Verify config was saved properly
-                if !config::is_config_complete() {
-                    eprintln!(
-                        "{}: Configuration incomplete. Please run '{} --config' to complete setup.",
-                        "Error".red().bold(),
-                        env!("CARGO_PKG_NAME")
-                    );
-                    process::exit(1);
-                }
-            println!(); // Blank line before submission
+        // Check if we have any sources
+        if !config::has_sources() {
+            println!(
+                "{} No sources configured. Let's add one.\n",
+                "ℹ".cyan().bold()
+            );
+            if let Err(e) = config::add_source_interactive() {
+                eprintln!("{}: {}", "Error".red().bold(), e);
+                process::exit(1);
+            }
+            println!();
         }
+        
         // Now run the submission workflow
-        if let Err(e) = run_submission() {
+        if let Err(e) = run_submission(cli.entry.as_deref()) {
             eprintln!("{}: {}", "Error".red().bold(), e);
             process::exit(1);
         }
@@ -173,28 +205,62 @@ fn print_help() {
     println!("  {} [OPTIONS]", env!("CARGO_PKG_NAME"));
     println!();
     println!("{}", "Options:".bold());
-    println!("  {}, {}     Edit configuration (API key, source URL, host, search engine)", "-c".cyan(), "--config".cyan());
-    println!("  {}, {}       Show current configuration", "-s".cyan(), "--show".cyan());
+    println!("  {}, {}     Edit configuration (API key, host, search engine)", "-c".cyan(), "--config".cyan());
+    println!("  {}, {}       Show current configuration and sources", "-s".cyan(), "--show".cyan());
+    println!("  {}, {}        Add a new source (feed or sitemap)", "-a".cyan(), "--add".cyan());
+    println!("  {}, {}     Remove a source", "-r".cyan(), "--remove".cyan());
+    println!("  {}, {}       List all configured sources", "-l".cyan(), "--list".cyan());
+    println!("  {}, {} {} Process only specific sources (comma-separated IDs)", "-e".cyan(), "--entry".cyan(), "<IDs>".dimmed());
     println!("      {}   Clear the database (WARNING: destructive operation)", "--clear-db".cyan());
     println!("  {}, {}    Dry run - show URLs that would be submitted", "-d".cyan(), "--dry-run".cyan());
     println!("  {}, {} Submit URLs without confirmation (for automation)", "-u".cyan(), "--unattended".cyan());
     println!("  {}, {}    Show version information", "-V".cyan(), "--version".cyan());
-    println!("  {}, {}       Show this help message", "-h".cyan(), "--help".cyan());
-    println!();
-    println!("{}", "Examples:".bold());
-    println!("  {} --config  # Configure API key, feed/sitemap URL, etc.", env!("CARGO_PKG_NAME"));
-    println!("  {}           # Run submission (default)", env!("CARGO_PKG_NAME"));
-    println!("  {} --dry-run # Show what would be submitted", env!("CARGO_PKG_NAME"));
-    println!("  {} -s        # Show current configuration", env!("CARGO_PKG_NAME"));
+    println!("  {}, {}       Show this help message", "-H".cyan(), "--help".cyan());
 }
 
-fn run_dry_run() -> Result<(), Box<dyn std::error::Error>> {
-    // Load and validate config
-    let cfg = config::load_config()?;
-    config::validate_config(&cfg)?;
+fn get_sources_to_process(entry_filter: Option<&[i64]>) -> Result<Vec<db::Source>, Box<dyn std::error::Error>> {
+    let all_sources = config::get_sources()?;
+    
+    if all_sources.is_empty() {
+        return Err("No sources configured. Run 'ixfeed --add' to add a source.".into());
+    }
+    
+    match entry_filter {
+        Some(ids) => {
+            let filtered: Vec<db::Source> = all_sources
+                .into_iter()
+                .filter(|s| ids.contains(&s.id))
+                .collect();
+            
+            if filtered.is_empty() {
+                return Err(format!(
+                    "No sources found with IDs: {:?}. Run 'ixfeed --list' to see available sources.",
+                    ids
+                ).into());
+            }
+            
+            Ok(filtered)
+        }
+        None => Ok(all_sources),
+    }
+}
 
+fn run_dry_run(entry_filter: Option<&[i64]>) -> Result<(), Box<dyn std::error::Error>> {
     // Initialize database
     let conn = db::init_db()?;
+    
+    // Get sources to process
+    let sources = get_sources_to_process(entry_filter)?;
+    
+    // Validate that all sources have required config
+    for source in &sources {
+        if source.api_key.is_empty() || source.host.is_empty() {
+            return Err(format!(
+                "Source {} ({}) is missing required configuration (api_key or host). Run '{} --config' to configure.",
+                source.id, source.source_url, env!("CARGO_PKG_NAME")
+            ).into());
+        }
+    }
 
     println!(
         "{} {} Dry Run Mode {}",
@@ -203,61 +269,92 @@ fn run_dry_run() -> Result<(), Box<dyn std::error::Error>> {
         "═".repeat(15).blue()
     );
     println!("{}", "No URLs will be submitted.\n".dimmed());
+    
+    if sources.len() > 1 {
+        println!(
+            "{} Processing {} sources...\n",
+            "ℹ".cyan().bold(),
+            sources.len()
+        );
+    }
+    
+    for source in &sources {
+        dry_run_source(&conn, source)?;
+        if sources.len() > 1 {
+            println!();
+        }
+    }
 
-    // Fetch URLs from source
-    let source_type_str = match cfg.source_type {
-        SourceType::Feed => "feed",
-        SourceType::Sitemap => "sitemap",
-    };
     println!(
-        "{} Fetching {} from {}...",
+        "\n{} To actually submit, run: {}",
         "→".blue().bold(),
-        source_type_str,
-        cfg.source_url
+        env!("CARGO_PKG_NAME").cyan()
     );
 
-    let entries: Vec<UrlEntry> = match cfg.source_type {
-        SourceType::Feed => feed::fetch_feed_urls(&cfg.source_url)?,
-        SourceType::Sitemap => sitemap::fetch_sitemap_urls(&cfg.source_url)?,
+    Ok(())
+}
+
+fn dry_run_source(conn: &rusqlite::Connection, source: &db::Source) -> Result<(), Box<dyn std::error::Error>> {
+    let source_type = if source.source_type == "sitemap" {
+        SourceType::Sitemap
+    } else {
+        SourceType::Feed
+    };
+    let source_type_str = if source.source_type == "sitemap" { "sitemap" } else { "feed" };
+    
+    println!(
+        "{} [{}] Fetching {} from {}...",
+        "→".blue().bold(),
+        source.id.to_string().bold(),
+        source_type_str,
+        source.source_url
+    );
+
+    let entries: Vec<UrlEntry> = match source_type {
+        SourceType::Feed => feed::fetch_feed_urls(&source.source_url)?,
+        SourceType::Sitemap => sitemap::fetch_sitemap_urls(&source.source_url)?,
     };
 
     if entries.is_empty() {
         println!(
-            "\n{} No URLs found in {}.",
+            "  {} No URLs found in {}.",
             "⚠".yellow().bold(),
             source_type_str
         );
         return Ok(());
     }
 
-    // Check if first run
-    let is_first_run = db::is_first_run(&conn)?;
+    // Check if first run for this source
+    let is_first_run = db::is_source_first_run(conn, source.id)?;
 
     if is_first_run {
         println!(
-            "\n{} First run detected. {} URL(s) found:\n",
+            "  {} First run detected. {} URL(s) found:\n",
             "ℹ".cyan().bold(),
             entries.len()
         );
         
-        for (i, entry) in entries.iter().enumerate() {
+        for (i, entry) in entries.iter().take(10).enumerate() {
             let date_str = entry.date.as_deref().unwrap_or("no date");
             println!(
-                "  {}. {} {}",
+                "    {}. {} {}",
                 (i + 1).to_string().dimmed(),
                 entry.url.green(),
                 format!("({})", date_str).dimmed()
             );
         }
+        if entries.len() > 10 {
+            println!("    {} ... and {} more", "".dimmed(), entries.len() - 10);
+        }
 
         println!(
-            "\n{} On actual run, you would be asked to confirm submission of all {} URL(s).",
+            "\n  {} On actual run, you would be asked to confirm submission of all {} URL(s).",
             "ℹ".cyan().bold(),
             entries.len()
         );
     } else {
         // Check for new or modified URLs
-        let stored_urls = db::get_urls_with_dates(&conn)?;
+        let stored_urls = db::get_urls_with_dates_for_source(conn, source.id)?;
         
         let mut new_urls: Vec<&UrlEntry> = Vec::new();
         let mut modified_urls: Vec<(&UrlEntry, Option<String>)> = Vec::new();
@@ -278,33 +375,32 @@ fn run_dry_run() -> Result<(), Box<dyn std::error::Error>> {
 
         if total_to_submit == 0 {
             println!(
-                "\n{} No new or modified URLs to submit.",
-                "✓".green().bold()
-            );
-            println!(
-                "{} All {} URL(s) are already up to date.",
-                "ℹ".cyan().bold(),
+                "  {} No new or modified URLs to submit. All {} URL(s) are up to date.",
+                "✓".green().bold(),
                 entries.len()
             );
             return Ok(());
         }
 
         println!(
-            "\n{} Would submit {} URL(s):\n",
+            "  {} Would submit {} URL(s):\n",
             "ℹ".cyan().bold(),
             total_to_submit
         );
 
         if !new_urls.is_empty() {
-            println!("{} ({}):", "New URLs".green().bold(), new_urls.len());
-            for (i, entry) in new_urls.iter().enumerate() {
+            println!("  {} ({}):", "New URLs".green().bold(), new_urls.len());
+            for (i, entry) in new_urls.iter().take(5).enumerate() {
                 let date_str = entry.date.as_deref().unwrap_or("no date");
                 println!(
-                    "  {}. {} {}",
+                    "    {}. {} {}",
                     (i + 1).to_string().dimmed(),
                     entry.url,
                     format!("({})", date_str).dimmed()
                 );
+            }
+            if new_urls.len() > 5 {
+                println!("    {} ... and {} more", "".dimmed(), new_urls.len() - 5);
             }
         }
 
@@ -312,120 +408,130 @@ fn run_dry_run() -> Result<(), Box<dyn std::error::Error>> {
             if !new_urls.is_empty() {
                 println!();
             }
-            println!("{} ({}):", "Modified URLs".yellow().bold(), modified_urls.len());
-            for (i, (entry, old_date)) in modified_urls.iter().enumerate() {
+            println!("  {} ({}):", "Modified URLs".yellow().bold(), modified_urls.len());
+            for (i, (entry, old_date)) in modified_urls.iter().take(5).enumerate() {
                 let old_str = old_date.as_deref().unwrap_or("unknown");
                 let new_str = entry.date.as_deref().unwrap_or("unknown");
                 println!(
-                    "  {}. {} {} → {}",
+                    "    {}. {} {} → {}",
                     (i + 1).to_string().dimmed(),
                     entry.url,
                     old_str.dimmed(),
                     new_str.cyan()
                 );
             }
+            if modified_urls.len() > 5 {
+                println!("    {} ... and {} more", "".dimmed(), modified_urls.len() - 5);
+            }
         }
     }
-
-    println!(
-        "\n{} To actually submit, run: {}",
-        "→".blue().bold(),
-        env!("CARGO_PKG_NAME").cyan()
-    );
 
     Ok(())
 }
 
-fn run_submission() -> Result<(), Box<dyn std::error::Error>> {
-    // Load and validate config
-    let cfg = config::load_config()?;
-    config::validate_config(&cfg)?;
-
+fn run_submission(entry_filter: Option<&[i64]>) -> Result<(), Box<dyn std::error::Error>> {
     // Initialize database
     let conn = db::init_db()?;
-
-    // Fetch URLs from source
-    let source_type_str = match cfg.source_type {
-        SourceType::Feed => "feed",
-        SourceType::Sitemap => "sitemap",
-    };
-    println!(
-        "{} Fetching {} from {}...",
-        "→".blue().bold(),
-        source_type_str,
-        cfg.source_url
-    );
-
-    let entries: Vec<UrlEntry> = match cfg.source_type {
-        SourceType::Feed => feed::fetch_feed_urls(&cfg.source_url)?,
-        SourceType::Sitemap => sitemap::fetch_sitemap_urls(&cfg.source_url)?,
-    };
-
-    if entries.is_empty() {
+    
+    // Get sources to process
+    let sources = get_sources_to_process(entry_filter)?;
+    
+    // Validate that all sources have required config
+    for source in &sources {
+        if source.api_key.is_empty() || source.host.is_empty() {
+            return Err(format!(
+                "Source {} ({}) is missing required configuration (api_key or host). Run '{} --config' to configure.",
+                source.id, source.source_url, env!("CARGO_PKG_NAME")
+            ).into());
+        }
+    }
+    
+    if sources.len() > 1 {
         println!(
-            "\n{} No URLs found in {}.",
-            "⚠".yellow().bold(),
-            source_type_str
+            "{} Processing {} sources...\n",
+            "ℹ".cyan().bold(),
+            sources.len()
         );
-        println!(
-            "{} Add content to your {} and run again.",
-            "→".blue().bold(),
-            source_type_str
-        );
-        return Ok(());
+    }
+    
+    for (idx, source) in sources.iter().enumerate() {
+        process_source(&conn, source, false)?;
+        if idx < sources.len() - 1 {
+            println!();
+        }
     }
 
-    println!(
-        "{} Found {} URLs in {}.",
-        "✓".green().bold(),
-        entries.len(),
-        source_type_str
-    );
-
-    // Check if this is first run using database flag
-    let is_first_run = db::is_first_run(&conn)?;
-
-    if is_first_run {
-        return handle_first_run(&conn, &cfg, &entries);
-    }
-
-    // Subsequent runs: check for new and modified URLs
-    handle_subsequent_run(&conn, &cfg, &entries)
+    Ok(())
 }
 
-fn run_unattended_submission() -> Result<(), Box<dyn std::error::Error>> {
-    // Load and validate config
-    let cfg = config::load_config()?;
-    config::validate_config(&cfg)?;
-
+fn run_unattended_submission(entry_filter: Option<&[i64]>) -> Result<(), Box<dyn std::error::Error>> {
     // Initialize database
     let conn = db::init_db()?;
+    
+    // Get sources to process
+    let sources = get_sources_to_process(entry_filter)?;
+    
+    // Validate that all sources have required config
+    for source in &sources {
+        if source.api_key.is_empty() || source.host.is_empty() {
+            return Err(format!(
+                "Source {} ({}) is missing required configuration (api_key or host). Run '{} --config' to configure.",
+                source.id, source.source_url, env!("CARGO_PKG_NAME")
+            ).into());
+        }
+    }
+    
+    if sources.len() > 1 {
+        println!(
+            "{} Processing {} sources (unattended)...\n",
+            "ℹ".cyan().bold(),
+            sources.len()
+        );
+    }
+    
+    for (idx, source) in sources.iter().enumerate() {
+        process_source(&conn, source, true)?;
+        if idx < sources.len() - 1 {
+            println!();
+        }
+    }
 
-    // Fetch URLs from source
-    let source_type_str = match cfg.source_type {
-        SourceType::Feed => "feed",
-        SourceType::Sitemap => "sitemap",
+    Ok(())
+}
+
+fn process_source(
+    conn: &rusqlite::Connection,
+    source: &db::Source,
+    unattended: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let source_type = if source.source_type == "sitemap" {
+        SourceType::Sitemap
+    } else {
+        SourceType::Feed
     };
+    let source_type_str = if source.source_type == "sitemap" { "sitemap" } else { "feed" };
+    
     println!(
-        "{} Fetching {} from {}...",
+        "{} [{}] Fetching {} from {}...",
         "→".blue().bold(),
+        source.id.to_string().bold(),
         source_type_str,
-        cfg.source_url
+        source.source_url
     );
 
-    let entries: Vec<UrlEntry> = match cfg.source_type {
-        SourceType::Feed => feed::fetch_feed_urls(&cfg.source_url)?,
-        SourceType::Sitemap => sitemap::fetch_sitemap_urls(&cfg.source_url)?,
+    let entries: Vec<UrlEntry> = match source_type {
+        SourceType::Feed => feed::fetch_feed_urls(&source.source_url)?,
+        SourceType::Sitemap => sitemap::fetch_sitemap_urls(&source.source_url)?,
     };
 
     if entries.is_empty() {
         println!(
-            "\n{} No URLs found in {}.",
+            "  {} No URLs found in {}.",
             "⚠".yellow().bold(),
             source_type_str
         );
         println!(
-            "{} Add content to your {} and run again.",
+            "  {} Add content to your {} and run again.",
             "→".blue().bold(),
             source_type_str
         );
@@ -433,41 +539,48 @@ fn run_unattended_submission() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!(
-        "{} Found {} URLs in {}.",
+        "  {} Found {} URLs in {}.",
         "✓".green().bold(),
         entries.len(),
         source_type_str
     );
 
-    // Check if this is first run using database flag
-    let is_first_run = db::is_first_run(&conn)?;
+    // Check if this is first run for this source
+    let is_first_run = db::is_source_first_run(conn, source.id)?;
 
     if is_first_run {
-        return handle_first_run_unattended(&conn, &cfg, &entries);
+        if unattended {
+            handle_first_run_unattended(conn, source, &entries)
+        } else {
+            handle_first_run(conn, source, &entries)
+        }
+    } else {
+        if unattended {
+            handle_subsequent_run_unattended(conn, source, &entries)
+        } else {
+            handle_subsequent_run(conn, source, &entries)
+        }
     }
-
-    // Subsequent runs: check for new and modified URLs
-    handle_subsequent_run_unattended(&conn, &cfg, &entries)
 }
 
 fn handle_first_run(
     conn: &rusqlite::Connection,
-    cfg: &config::Config,
+    source: &db::Source,
     entries: &[UrlEntry],
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!(
-        "\n{} First run detected. Found {} URLs.",
+        "\n  {} First run detected for this source. Found {} URLs.",
         "ℹ".cyan().bold(),
         entries.len()
     );
 
     // Store all URLs in database first
-    println!("{} Storing URLs in database...", "→".blue().bold());
+    println!("  {} Storing URLs in database...", "→".blue().bold());
     for entry in entries {
-        db::add_url_with_date(conn, &entry.url, entry.date.as_deref())?;
+        db::add_url_with_date_for_source(conn, source.id, &entry.url, entry.date.as_deref())?;
     }
     println!(
-        "{} Stored {} URLs.",
+        "  {} Stored {} URLs.",
         "✓".green().bold(),
         entries.len()
     );
@@ -475,13 +588,13 @@ fn handle_first_run(
     // Ask user if they want to submit all URLs
     println!();
     println!(
-        "{} {}",
+        "  {} {}",
         "⚠ WARNING:".yellow().bold(),
         "Submitting all URLs on first run may include outdated or deprecated links."
     );
 
     let should_submit = Confirm::new()
-        .with_prompt("Do you want to submit all found URLs?")
+        .with_prompt(format!("  Do you want to submit all {} found URLs?", entries.len()))
         .default(false)
         .interact()?;
 
@@ -496,54 +609,54 @@ fn handle_first_run(
             .collect();
 
         println!(
-            "\n{} Submitting {} URL(s) to {}...\n",
+            "\n  {} Submitting {} URL(s) to {}...\n",
             "→".blue().bold(),
             submit_entries.len(),
-            cfg.searchengine
+            source.searchengine
         );
 
-        submit::submit_in_batches(cfg, &submit_entries)?;
+        submit::submit_in_batches(&source.api_key, &source.host, &source.searchengine, &submit_entries)?;
 
         println!(
-            "\n{} Successfully submitted {} URL(s).",
+            "\n  {} Successfully submitted {} URL(s).",
             "✓".green().bold(),
             submit_entries.len()
         );
     } else {
         println!(
-            "\n{} URLs stored but not submitted.",
+            "\n  {} URLs stored but not submitted.",
             "ℹ".cyan().bold()
         );
         println!(
-            "{} Add new content and run again to submit only the new URLs.",
+            "  {} Add new content and run again to submit only the new URLs.",
             "→".blue().bold()
         );
     }
 
-    // Mark first run as completed
-    db::mark_first_run_completed(conn)?;
+    // Mark first run as completed for this source
+    db::mark_source_first_run_completed(conn, source.id)?;
 
     Ok(())
 }
 
 fn handle_first_run_unattended(
     conn: &rusqlite::Connection,
-    cfg: &config::Config,
+    source: &db::Source,
     entries: &[UrlEntry],
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!(
-        "\n{} First run detected. Found {} URLs.",
+        "\n  {} First run detected for this source. Found {} URLs.",
         "ℹ".cyan().bold(),
         entries.len()
     );
 
     // Store all URLs in database first
-    println!("{} Storing URLs in database...", "→".blue().bold());
+    println!("  {} Storing URLs in database...", "→".blue().bold());
     for entry in entries {
-        db::add_url_with_date(conn, &entry.url, entry.date.as_deref())?;
+        db::add_url_with_date_for_source(conn, source.id, &entry.url, entry.date.as_deref())?;
     }
     println!(
-        "{} Stored {} URLs.",
+        "  {} Stored {} URLs.",
         "✓".green().bold(),
         entries.len()
     );
@@ -551,7 +664,7 @@ fn handle_first_run_unattended(
     // Automatically submit all URLs (unattended mode)
     println!();
     println!(
-        "{} Unattended mode: Submitting all URLs on first run.",
+        "  {} Unattended mode: Submitting all URLs on first run.",
         "ℹ".cyan().bold()
     );
 
@@ -565,33 +678,33 @@ fn handle_first_run_unattended(
         .collect();
 
     println!(
-        "\n{} Submitting {} URL(s) to {}...\n",
+        "\n  {} Submitting {} URL(s) to {}...\n",
         "→".blue().bold(),
         submit_entries.len(),
-        cfg.searchengine
+        source.searchengine
     );
 
-    submit::submit_in_batches(cfg, &submit_entries)?;
+    submit::submit_in_batches(&source.api_key, &source.host, &source.searchengine, &submit_entries)?;
 
     println!(
-        "\n{} Successfully submitted {} URL(s).",
+        "\n  {} Successfully submitted {} URL(s).",
         "✓".green().bold(),
         submit_entries.len()
     );
 
-    // Mark first run as completed
-    db::mark_first_run_completed(conn)?;
+    // Mark first run as completed for this source
+    db::mark_source_first_run_completed(conn, source.id)?;
 
     Ok(())
 }
 
 fn handle_subsequent_run(
     conn: &rusqlite::Connection,
-    cfg: &config::Config,
+    source: &db::Source,
     entries: &[UrlEntry],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Get stored URLs with their dates
-    let stored_urls = db::get_urls_with_dates(conn)?;
+    // Get stored URLs with their dates for this source
+    let stored_urls = db::get_urls_with_dates_for_source(conn, source.id)?;
 
     let mut to_submit: Vec<SubmitEntry> = Vec::new();
     let mut new_count = 0;
@@ -628,14 +741,14 @@ fn handle_subsequent_run(
 
     if to_submit.is_empty() {
         println!(
-            "{} No new or modified URLs to submit. All URLs are up to date.",
+            "  {} No new or modified URLs to submit. All URLs are up to date.",
             "✓".green().bold()
         );
         return Ok(());
     }
 
     println!(
-        "\n{} Found {} URL(s) to submit: {} new, {} modified",
+        "\n  {} Found {} URL(s) to submit: {} new, {} modified",
         "ℹ".cyan().bold(),
         to_submit.len(),
         new_count,
@@ -644,42 +757,48 @@ fn handle_subsequent_run(
 
     // List URLs to be submitted
     if new_count > 0 {
-        println!("\n{} ({}):", "New URLs".green().bold(), new_count);
-        for entry in to_submit.iter().filter(|e| matches!(e.reason, SubmitReason::New)) {
-            println!("  • {}", entry.url);
+        println!("\n  {} ({}):", "New URLs".green().bold(), new_count);
+        for entry in to_submit.iter().filter(|e| matches!(e.reason, SubmitReason::New)).take(5) {
+            println!("    • {}", entry.url);
+        }
+        if new_count > 5 {
+            println!("    {} ... and {} more", "".dimmed(), new_count - 5);
         }
     }
     if modified_count > 0 {
-        println!("\n{} ({}):", "Modified URLs".yellow().bold(), modified_count);
-        for entry in &to_submit {
+        println!("\n  {} ({}):", "Modified URLs".yellow().bold(), modified_count);
+        for entry in to_submit.iter().filter(|e| matches!(e.reason, SubmitReason::Modified { .. })).take(5) {
             if let SubmitReason::Modified { date } = &entry.reason {
-                println!("  • {} (updated: {})", entry.url, date.cyan());
+                println!("    • {} (updated: {})", entry.url, date.cyan());
             }
+        }
+        if modified_count > 5 {
+            println!("    {} ... and {} more", "".dimmed(), modified_count - 5);
         }
     }
 
     // Confirm before submitting
     println!();
     let should_submit = Confirm::new()
-        .with_prompt(format!("Submit {} URL(s) to IndexNow?", to_submit.len()))
+        .with_prompt(format!("  Submit {} URL(s) to IndexNow?", to_submit.len()))
         .default(true)
         .interact()?;
 
     if !should_submit {
         println!(
-            "\n{} Submission cancelled.",
+            "\n  {} Submission cancelled.",
             "ℹ".cyan().bold()
         );
         return Ok(());
     }
 
     println!(
-        "\n{} Submitting to {}...\n",
+        "\n  {} Submitting to {}...\n",
         "→".blue().bold(),
-        cfg.searchengine
+        source.searchengine
     );
 
-    submit::submit_in_batches(cfg, &to_submit)?;
+    submit::submit_in_batches(&source.api_key, &source.host, &source.searchengine, &to_submit)?;
 
     // Update database with submitted URLs
     for entry in &to_submit {
@@ -690,11 +809,11 @@ fn handle_subsequent_run(
                 .and_then(|e| e.date.as_deref()),
             SubmitReason::Modified { date } => Some(date.as_str()),
         };
-        db::add_url_with_date(conn, &entry.url, date)?;
+        db::add_url_with_date_for_source(conn, source.id, &entry.url, date)?;
     }
 
     println!(
-        "\n{} Successfully submitted and stored {} URL(s).",
+        "\n  {} Successfully submitted and stored {} URL(s).",
         "✓".green().bold(),
         to_submit.len()
     );
@@ -704,11 +823,11 @@ fn handle_subsequent_run(
 
 fn handle_subsequent_run_unattended(
     conn: &rusqlite::Connection,
-    cfg: &config::Config,
+    source: &db::Source,
     entries: &[UrlEntry],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Get stored URLs with their dates
-    let stored_urls = db::get_urls_with_dates(conn)?;
+    // Get stored URLs with their dates for this source
+    let stored_urls = db::get_urls_with_dates_for_source(conn, source.id)?;
 
     let mut to_submit: Vec<SubmitEntry> = Vec::new();
     let mut new_count = 0;
@@ -745,14 +864,14 @@ fn handle_subsequent_run_unattended(
 
     if to_submit.is_empty() {
         println!(
-            "{} No new or modified URLs to submit. All URLs are up to date.",
+            "  {} No new or modified URLs to submit. All URLs are up to date.",
             "✓".green().bold()
         );
         return Ok(());
     }
 
     println!(
-        "\n{} Found {} URL(s) to submit: {} new, {} modified",
+        "\n  {} Found {} URL(s) to submit: {} new, {} modified",
         "ℹ".cyan().bold(),
         to_submit.len(),
         new_count,
@@ -761,30 +880,36 @@ fn handle_subsequent_run_unattended(
 
     // List URLs to be submitted
     if new_count > 0 {
-        println!("\n{} ({}):", "New URLs".green().bold(), new_count);
-        for entry in to_submit.iter().filter(|e| matches!(e.reason, SubmitReason::New)) {
-            println!("  • {}", entry.url);
+        println!("\n  {} ({}):", "New URLs".green().bold(), new_count);
+        for entry in to_submit.iter().filter(|e| matches!(e.reason, SubmitReason::New)).take(5) {
+            println!("    • {}", entry.url);
+        }
+        if new_count > 5 {
+            println!("    {} ... and {} more", "".dimmed(), new_count - 5);
         }
     }
     if modified_count > 0 {
-        println!("\n{} ({}):", "Modified URLs".yellow().bold(), modified_count);
-        for entry in &to_submit {
+        println!("\n  {} ({}):", "Modified URLs".yellow().bold(), modified_count);
+        for entry in to_submit.iter().filter(|e| matches!(e.reason, SubmitReason::Modified { .. })).take(5) {
             if let SubmitReason::Modified { date } = &entry.reason {
-                println!("  • {} (updated: {})", entry.url, date.cyan());
+                println!("    • {} (updated: {})", entry.url, date.cyan());
             }
+        }
+        if modified_count > 5 {
+            println!("    {} ... and {} more", "".dimmed(), modified_count - 5);
         }
     }
 
     // Unattended mode: submit without confirmation
     println!();
     println!(
-        "{} Unattended mode: Submitting {} URL(s) to {}...\n",
+        "  {} Unattended mode: Submitting {} URL(s) to {}...\n",
         "→".blue().bold(),
         to_submit.len(),
-        cfg.searchengine
+        source.searchengine
     );
 
-    submit::submit_in_batches(cfg, &to_submit)?;
+    submit::submit_in_batches(&source.api_key, &source.host, &source.searchengine, &to_submit)?;
 
     // Update database with submitted URLs
     for entry in &to_submit {
@@ -795,11 +920,11 @@ fn handle_subsequent_run_unattended(
                 .and_then(|e| e.date.as_deref()),
             SubmitReason::Modified { date } => Some(date.as_str()),
         };
-        db::add_url_with_date(conn, &entry.url, date)?;
+        db::add_url_with_date_for_source(conn, source.id, &entry.url, date)?;
     }
 
     println!(
-        "\n{} Successfully submitted and stored {} URL(s).",
+        "\n  {} Successfully submitted and stored {} URL(s).",
         "✓".green().bold(),
         to_submit.len()
     );
