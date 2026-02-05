@@ -74,8 +74,8 @@ cargo build --release
 | `ixfeed -d, --dry-run` | Preview URLs that would be submitted |
 | `ixfeed -u, --unattended` | Submit all sources without confirmation (for automation) |
 | `ixfeed --clear-db` | Clear the URL database (destructive!) |
-| `ixfeed -V, --version` | Show version |
-| `ixfeed -H, --help` | Show help |
+| `ixfeed -v, --version` | Show version |
+| `ixfeed -h, --help` | Show help |
 
 ## Configuration
 
