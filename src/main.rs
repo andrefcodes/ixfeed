@@ -22,7 +22,7 @@ mod submit;
 use clap::Parser;
 use colored::*;
 use config::SourceType;
-use dialoguer::Confirm;
+use dialoguer::{Confirm, Input};
 use feed::UrlEntry;
 use std::process;
 use submit::{SubmitEntry, SubmitReason};
@@ -55,7 +55,7 @@ struct Cli {
     list: bool,
 
     /// Process only specific source entries (comma-separated IDs, e.g., -e 1,2,3)
-    #[arg(short, long, value_delimiter = ',')]
+    #[arg(short, long, value_delimiter = ',', num_args = 0..)]
     entry: Option<Vec<i64>>,
 
     /// Clear the database (WARNING: destructive operation)
@@ -71,11 +71,11 @@ struct Cli {
     unattended: bool,
 
     /// Show version information
-    #[arg(short = 'V', long)]
+    #[arg(short = 'v', long)]
     version: bool,
 
     /// Show help information
-    #[arg(short = 'H', long)]
+    #[arg(short = 'h', long)]
     help: bool,
 }
 
@@ -156,8 +156,23 @@ fn main() {
         return;
     }
 
+    // Resolve entry filter - if -e was provided without IDs, prompt user
+    let resolved_entry: Option<Vec<i64>> = match &cli.entry {
+        Some(ids) if ids.is_empty() => {
+            // -e flag provided without IDs, prompt user
+            match prompt_for_source_ids() {
+                Ok(ids) => Some(ids),
+                Err(e) => {
+                    eprintln!("{}: {}", "Error".red().bold(), e);
+                    process::exit(1);
+                }
+            }
+        }
+        other => other.clone(),
+    };
+
     if cli.dry_run {
-        if let Err(e) = run_dry_run(cli.entry.as_deref()) {
+        if let Err(e) = run_dry_run(resolved_entry.as_deref()) {
             eprintln!("{}: {}", "Error".red().bold(), e);
             process::exit(1);
         }
@@ -165,7 +180,7 @@ fn main() {
     }
 
     if cli.unattended {
-        if let Err(e) = run_unattended_submission(cli.entry.as_deref()) {
+        if let Err(e) = run_unattended_submission(resolved_entry.as_deref()) {
             eprintln!("{}: {}", "Error".red().bold(), e);
             process::exit(1);
         }
@@ -188,7 +203,7 @@ fn main() {
         }
         
         // Now run the submission workflow
-        if let Err(e) = run_submission(cli.entry.as_deref()) {
+        if let Err(e) = run_submission(resolved_entry.as_deref()) {
             eprintln!("{}: {}", "Error".red().bold(), e);
             process::exit(1);
         }
@@ -214,8 +229,8 @@ fn print_help() {
     println!("      {}   Clear the database (WARNING: destructive operation)", "--clear-db".cyan());
     println!("  {}, {}    Dry run - show URLs that would be submitted", "-d".cyan(), "--dry-run".cyan());
     println!("  {}, {} Submit URLs without confirmation (for automation)", "-u".cyan(), "--unattended".cyan());
-    println!("  {}, {}    Show version information", "-V".cyan(), "--version".cyan());
-    println!("  {}, {}       Show this help message", "-H".cyan(), "--help".cyan());
+    println!("  {}, {}    Show version information", "-v".cyan(), "--version".cyan());
+    println!("  {}, {}       Show this help message", "-h".cyan(), "--help".cyan());
 }
 
 fn get_sources_to_process(entry_filter: Option<&[i64]>) -> Result<Vec<db::Source>, Box<dyn std::error::Error>> {
@@ -243,6 +258,58 @@ fn get_sources_to_process(entry_filter: Option<&[i64]>) -> Result<Vec<db::Source
         }
         None => Ok(all_sources),
     }
+}
+
+/// Prompt user to select source IDs when -e/--entry is provided without IDs
+fn prompt_for_source_ids() -> Result<Vec<i64>, Box<dyn std::error::Error>> {
+    let sources = config::get_sources()?;
+    
+    if sources.is_empty() {
+        return Err("No sources configured. Run 'ixfeed --add' to add a source.".into());
+    }
+    
+    println!("{}", "Available sources:".bold());
+    for source in &sources {
+        let type_str = match source.source_type.as_str() {
+            "sitemap" => "Sitemap".cyan(),
+            _ => "Feed".cyan(),
+        };
+        let status = if source.first_run_completed {
+            "synced".green()
+        } else {
+            "new".yellow()
+        };
+        println!(
+            "  ID {} [{}] {} ({})",
+            source.id.to_string().bold(),
+            type_str,
+            source.source_url,
+            status
+        );
+    }
+    
+    println!();
+    let input: String = Input::new()
+        .with_prompt("Enter source ID(s) to process (comma-separated, e.g., 1,2,3)")
+        .interact_text()?;
+    
+    let ids: Vec<i64> = input
+        .split(',')
+        .filter_map(|s| s.trim().parse().ok())
+        .collect();
+    
+    if ids.is_empty() {
+        return Err("No valid IDs provided.".into());
+    }
+    
+    // Validate that all IDs exist
+    let valid_ids: Vec<i64> = sources.iter().map(|s| s.id).collect();
+    let invalid: Vec<&i64> = ids.iter().filter(|id| !valid_ids.contains(id)).collect();
+    if !invalid.is_empty() {
+        return Err(format!("Invalid source ID(s): {:?}", invalid).into());
+    }
+    
+    Ok(ids)
 }
 
 fn run_dry_run(entry_filter: Option<&[i64]>) -> Result<(), Box<dyn std::error::Error>> {
@@ -303,7 +370,7 @@ fn dry_run_source(conn: &rusqlite::Connection, source: &db::Source) -> Result<()
     let source_type_str = if source.source_type == "sitemap" { "sitemap" } else { "feed" };
     
     println!(
-        "{} [{}] Fetching {} from {}...",
+        "{} [ID {}] Fetching {} from {}...",
         "→".blue().bold(),
         source.id.to_string().bold(),
         source_type_str,
@@ -512,7 +579,7 @@ fn process_source(
     let source_type_str = if source.source_type == "sitemap" { "sitemap" } else { "feed" };
     
     println!(
-        "{} [{}] Fetching {} from {}...",
+        "{} [ID {}] Fetching {} from {}...",
         "→".blue().bold(),
         source.id.to_string().bold(),
         source_type_str,
