@@ -58,13 +58,13 @@ cargo build --release
 | Command | Description |
 |---------|-------------|
 | `ixfeed` | Run the submission process (default) |
-| `ixfeed config` | Edit configuration interactively |
-| `ixfeed show` | Show current configuration |
-| `ixfeed dry-run` | Preview URLs that would be submitted |
-| `ixfeed unattended` | Submit URLs without confirmation (for automation) |
-| `ixfeed clear-db` | Clear the URL database (destructive!) |
-| `ixfeed version` | Show version |
-| `ixfeed help` | Show help |
+| `ixfeed -c, --config` | Edit configuration interactively |
+| `ixfeed -s, --show` | Show current configuration |
+| `ixfeed -d, --dry-run` | Preview URLs that would be submitted |
+| `ixfeed -u, --unattended` | Submit URLs without confirmation (for automation) |
+| `ixfeed --clear-db` | Clear the URL database (destructive!) |
+| `ixfeed -V, --version` | Show version |
+| `ixfeed -h, --help` | Show help |
 
 ## Configuration
 
@@ -130,13 +130,13 @@ Configuration is stored in SQLite database:
 
 ## Automation
 
-> **⚠️ Warning**: Before setting up automated runs with `ixfeed unattended`, run the application interactively (`ixfeed`) at least once to review and confirm the initial URL submission. Unattended mode will automatically submit all URLs on first run without confirmation.
+> **⚠️ Warning**: Before setting up automated runs with `ixfeed --unattended`, run the application interactively (`ixfeed`) at least once to review and confirm the initial URL submission. Unattended mode will automatically submit all URLs on first run without confirmation.
 
 ### Cron (Linux/macOS)
 
 ```bash
-# Run every hour (use unattended subcommand for non-interactive)
-0 * * * * /path/to/ixfeed unattended >> /var/log/ixfeed.log 2>&1
+# Run every hour (use --unattended flag for non-interactive)
+0 * * * * /path/to/ixfeed --unattended >> /var/log/ixfeed.log 2>&1
 ```
 
 ### Systemd Timer
@@ -148,7 +148,7 @@ Description=IndexNow Feed/Sitemap Submitter
 
 [Service]
 Type=oneshot
-ExecStart=/path/to/ixfeed unattended
+ExecStart=/path/to/ixfeed --unattended
 User=youruser
 ```
 
