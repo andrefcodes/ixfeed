@@ -15,7 +15,6 @@
 /// You should have received a copy of the GNU Affero General Public License
 /// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-use crate::config::Config;
 use colored::*;
 use reqwest::blocking::Client;
 use serde::Serialize;
@@ -54,14 +53,14 @@ impl std::fmt::Display for SubmitReason {
     }
 }
 
-pub fn submit_single(cfg: &Config, entry: &SubmitEntry) -> Result<(), Box<dyn std::error::Error>> {
+pub fn submit_single(api_key: &str, _host: &str, searchengine: &str, entry: &SubmitEntry) -> Result<(), Box<dyn std::error::Error>> {
     let client = build_client()?;
 
     let submit_url = format!(
         "https://{}/indexnow?url={}&key={}",
-        cfg.searchengine,
+        searchengine,
         urlencoding::encode(&entry.url),
-        cfg.api_key
+        api_key
     );
 
     print_url_info(entry);
@@ -79,7 +78,7 @@ pub fn submit_single(cfg: &Config, entry: &SubmitEntry) -> Result<(), Box<dyn st
 }
 
 /// Submit URLs in batches of up to MAX_BATCH_SIZE
-pub fn submit_in_batches(cfg: &Config, entries: &[SubmitEntry]) -> Result<(), Box<dyn std::error::Error>> {
+pub fn submit_in_batches(api_key: &str, host: &str, searchengine: &str, entries: &[SubmitEntry]) -> Result<(), Box<dyn std::error::Error>> {
     let total = entries.len();
     let num_batches = (total + MAX_BATCH_SIZE - 1) / MAX_BATCH_SIZE;
 
@@ -105,25 +104,25 @@ pub fn submit_in_batches(cfg: &Config, entries: &[SubmitEntry]) -> Result<(), Bo
         }
 
         if chunk.len() == 1 {
-            submit_single(cfg, &chunk[0])?;
+            submit_single(api_key, host, searchengine, &chunk[0])?;
         } else {
-            submit_bulk(cfg, chunk)?;
+            submit_bulk(api_key, host, searchengine, chunk)?;
         }
     }
 
     Ok(())
 }
 
-fn submit_bulk(cfg: &Config, entries: &[SubmitEntry]) -> Result<(), Box<dyn std::error::Error>> {
+fn submit_bulk(api_key: &str, host: &str, searchengine: &str, entries: &[SubmitEntry]) -> Result<(), Box<dyn std::error::Error>> {
     let client = build_client()?;
 
-    let submit_url = format!("https://{}/indexnow", cfg.searchengine);
+    let submit_url = format!("https://{}/indexnow", searchengine);
 
     let urls: Vec<String> = entries.iter().map(|e| e.url.clone()).collect();
 
     let payload = BulkRequest {
-        host: &cfg.host,
-        key: &cfg.api_key,
+        host,
+        key: api_key,
         url_list: &urls,
     };
 
