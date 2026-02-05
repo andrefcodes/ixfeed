@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0-alpha.1] - 2026-02-05
+
+### Added
+- Multi-source management: manage multiple feed/sitemap sources in database
+- CLI commands: `add`, `remove`, and `list` subcommands for source management
+- Legacy configuration migration for existing users
+
+### Changed
+- Refactored submission functions to use direct parameters instead of config
+- Simplified command-line argument handling in CLI struct
+- Enhanced README with detailed source management instructions
+
+### Fixed
+- Updated macOS platform description in README
+- Removed redundant warning about first run requirement for unattended mode
+
 ## [0.1.0-alpha.1] - 2026-01-18
 
 ### Added
