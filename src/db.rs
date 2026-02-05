@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
-fn db_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
+pub fn db_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
     let data_dir = dirs::data_dir()
         .ok_or("Could not determine data directory")?
         .join("ixfeed");
@@ -101,6 +101,38 @@ pub fn init_db() -> Result<Connection, Box<dyn std::error::Error>> {
             "ALTER TABLE submitted_urls ADD COLUMN last_modified TEXT",
             [],
         );
+    }
+
+    // Migration: ensure UNIQUE(source_id, url) constraint exists
+    // SQLite doesn't allow adding constraints via ALTER TABLE, so we need to check
+    // if the constraint exists and recreate the table if it doesn't
+    let has_unique_constraint: bool = {
+        let sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='submitted_urls'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or_default();
+        sql.contains("UNIQUE(source_id, url)")
+    };
+    if !has_unique_constraint {
+        // Recreate the table with the proper unique constraint
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS submitted_urls_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_id INTEGER,
+                url TEXT NOT NULL,
+                last_modified TEXT,
+                submitted_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+                UNIQUE(source_id, url),
+                FOREIGN KEY (source_id) REFERENCES sources(id) ON DELETE CASCADE
+            );
+            INSERT OR IGNORE INTO submitted_urls_new (id, source_id, url, last_modified, submitted_at)
+                SELECT id, source_id, url, last_modified, submitted_at FROM submitted_urls;
+            DROP TABLE submitted_urls;
+            ALTER TABLE submitted_urls_new RENAME TO submitted_urls;"
+        )?;
     }
 
     // Migration: add per-source config columns if they don't exist
