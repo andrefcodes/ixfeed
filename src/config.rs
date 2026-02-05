@@ -207,7 +207,7 @@ pub fn edit_config() -> Result<(), Box<dyn std::error::Error>> {
                 "sitemap" => "Sitemap",
                 _ => "Feed",
             };
-            format!("[{}] {} - {}", s.id, type_str, s.source_url)
+            format!("[ID {}] {} - {}", s.id, type_str, s.source_url)
         })
         .collect();
 
@@ -495,7 +495,7 @@ pub fn list_sources() -> Result<(), Box<dyn std::error::Error>> {
             "new".yellow()
         };
         println!(
-            "  {} [{}] {} ({})",
+            "  ID {} [{}] {} ({})",
             source.id.to_string().bold(),
             type_str,
             source.source_url,
@@ -541,7 +541,7 @@ pub fn remove_source_interactive() -> Result<(), Box<dyn std::error::Error>> {
             "sitemap" => "Sitemap",
             _ => "Feed",
         };
-        println!("  {} [{}] {}", source.id, type_str, source.source_url);
+        println!("  ID {} [{}] {}", source.id, type_str, source.source_url);
     }
     
     // Ask for ID
@@ -593,7 +593,8 @@ pub fn list_config() -> Result<(), Box<dyn std::error::Error>> {
         "{} IndexNow Configuration",
         "═".repeat(40).blue().bold()
     );
-    println!("Stored in: {}\n", "SQLite database".dimmed());
+    let db_path = db::db_path().map(|p| p.display().to_string()).unwrap_or_else(|_| "unknown".to_string());
+    println!("Stored in: SQLite database at {}\n", db_path.dimmed());
 
     if sources.is_empty() {
         println!(
@@ -616,7 +617,7 @@ pub fn list_config() -> Result<(), Box<dyn std::error::Error>> {
             "new".yellow()
         };
         println!(
-            "\n  {} [{}] {} ({})",
+            "\n  ID {} [{}] {} ({})",
             source.id.to_string().bold(),
             type_str,
             source.source_url.green(),
